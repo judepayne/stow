@@ -1,0 +1,4 @@
+{:paths ["src"]
+ :deps {buddy/buddy-core {:mvn/version "1.10.413"}
+        buddy/buddy-hashers {:mvn/version "1.8.158"}
+        babashka/babashka.pods {:mvn/version "0.2.0"}}}
