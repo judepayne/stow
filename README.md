@@ -21,25 +21,32 @@ io.github.judepayne/dictim {:git/tag "0.0.1" :git/sha "b64ebf3"}
 
 Stow has a `stow.api` namespace that exposes all the public functions.
 
+````clojure
     user> (require '[stow.api :refer [do-cmd]])
     nil
     user> (do-cmd :init "stow.db" "mypassw0rd")
     {:result true}
+````
 
 `:init` is to initialize a new encrypted db file or authenticate against an existing one.
 
+````clojure
     user> (do-cmd :add-node "facebook.com" "myFacebookPwd")
     {:result {:id 1, :parent :root}}
+````
 
 A stow node is identified by it's `:parent` and it's `:key`. When you don't specify a `:parent` when adding a node, it's defaulted to `:root`.
 
 Having both `:parent` and `:key` gives flexibility on how to arrange your data. For example, you might choose to have a `:parent` as "facebook.com" (or :facebook - stow accepts most Clojure data structures), with multiple keys beneath it, e.g. `:uer`, `:password` etc, or you might choose to ignore `:parent` (accept the default `:root` and store multiple values in a clojure data structure stored under `:value`. See below.
 
+````clojure
     user> (do-cmd :list)
     {:result ([:root "facebook.com"])}
+````
 
 A list of `:parent` `:key` tuples.
 
+````clojure
     user> (do-cmd :get-all-nodes)
     {:result
      [{:id 1,
@@ -49,9 +56,11 @@ A list of `:parent` `:key` tuples.
        :version 1,
        :created "2023-04-04 20:27:41",
        :modified "2023-04-04 20:27:41"}]}
+````
 
 `:parent`, `:key` and `:value` are kept encrypted in the database.
 
+````clojure
     user> (do-cmd :get-all-nodes :decrypt? true)
     {:result
      ({:key "facebook.com",
@@ -63,24 +72,28 @@ A list of `:parent` `:key` tuples.
        :parent :root})}
     user> (do-cmd :authenticated)
     {:result true}
+````
 
 The majority of functions require to be in an authenticated state.
 
+````clojure
     user> (do-cmd :delete-node :root "facebook.com")
     {:result {:rows-affected 1, :last-inserted-id 0}}
 
-
     user> (do-cmd :add-node "facebook.com" {:user "myuserID" :pwd "myFacebookPwd"})
     {:result {:id 1, :parent :root}}
+````
 
 Clojure data structures can be used in the `:value` key. They can be used as `:parents` and `:keys` for that matter but the use cases are fewer!
 
+````clojure
     user> (do-cmd :update-node-with :root "facebook.com" assoc :notes "close this account")
     {:result {:rows-affected 1, :last-inserted-id 0}}
-
+````
 
 `:update-node-with` allows you to apply functions to update clojure data structure's stored in `:value` keys. Here we're assoc'ing a `:notes` key and value into the existing map.
 
+````clojure
     user> (do-cmd :get-all-nodes :decrypt? true)
     {:result
      ({:modified "2023-04-04 20:31:04",
@@ -93,6 +106,7 @@ Clojure data structures can be used in the `:value` key. They can be used as `:p
 	:notes "close this account"},
        :version 2,
        :created "2023-04-04 20:30:26"})}
+````
 
 Please see the `stow.api` namespace and underlying `stow.db` namespace for other useful functions.
 
