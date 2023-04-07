@@ -21,6 +21,7 @@ io.github.judepayne/dictim {:git/tag "0.0.2" :git/sha "cddae48"}
 
 Stow has a `stow.api` namespace that exposes all the public functions.
 
+
 ````clojure
     user> (require '[stow.api :refer [do-cmd]])
     nil
