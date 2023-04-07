@@ -96,6 +96,16 @@
 (defn- store-main-hash [salt] (store-config "main-hash" salt))
 
 
+(defn- fetch-def-parent [] (fetch-config "default-parent"))
+
+
+(defn- store-def-parent [def-parent] (store-config "default-parent" def-parent))
+
+
+(defn- default-parent []
+  (or (fetch-def-parent) :root))
+
+
 ;; nodes
 
 (defn- encrypt [item]
@@ -138,14 +148,15 @@
 
 
 (defn- node-exists?
-  [parent key]
-  (if (seq (query
-            (substitute
-             "SELECT id FROM node WHERE parent=$p AND key=$k"
-             {"$p" (prep parent)
-              "$k" (prep key)})))
-    true
-    false))
+  ([key] (node-exists? (default-parent) key))
+  ([parent key]
+   (if (seq (query
+             (substitute
+              "SELECT id FROM node WHERE parent=$p AND key=$k"
+              {"$p" (prep parent)
+               "$k" (prep key)})))
+     true
+     false)))
 
 
 (def ^:private add-node-error
@@ -158,11 +169,12 @@
 
 (defn- add-node*
   "Adds a node to the db. The keys :key and :value should be specified.
-   Optionally a :parent can be specified. If it is not, it's defaulted to :root
+   Optionally a :parent can be specified. If it is not, it's defaulted to the
+   current `default-parent` (or `:root` if that is not set).
    Checks if the key already exists under the parent, and if
    :skip? is true returns nil, otherwise throws an error."
   [& {:keys [key value parent skip?]
-      :or {parent :root skip? false}}]
+      :or {parent (default-parent) skip? false}}]
   (if (not (and key value))
     (throw (ex-info add-node-error {}))
     (let [{p :parent k :key v :value} (encode {:key key :value value :parent parent})]
@@ -184,9 +196,7 @@
                            "$k" k}))
                         first
                         :id)]
-            (if (= :root parent)
-              {:id nid :parent :root}
-              {:id nid})))
+            {:id nid :parent :root}))
 
         (if skip?
           :not-inserted
@@ -219,6 +229,17 @@
        nodes))
 
 
+(defn add-multi
+  "Adds multiple nodes specified by kvs (a list of keys and their values) under
+   the parent. e.g. `add-multi facebook :user jude :pwd 6%%fdgWo`."
+  [parent & kvs]
+  (let [kvs (partition 2 kvs)
+        nodes (map
+               (fn [[k v]] {:parent parent :key k :value v})
+               kvs)]
+    (apply add-nodes nodes)))
+
+
 (defn get-nodes-by-parent
   "Lists the keys of the nodes under the parent."
   [parent & {:keys [decrypt?] :or {decrypt? true}}]
@@ -226,32 +247,41 @@
    (fn [n] (if decrypt? (decode n) n))
    (query
     (substitute
-     "SELECT id, key FROM node WHERE parent=$p"
+     "SELECT * FROM node WHERE parent=$p"
      {"$p" (prep parent)}))))
 
 
 (defn get-nodes-by-key
-  "Returns nodes with key equal to k."
-  [k & {:keys [decrypt?] :or {decrypt? true}}]
+  "Returns nodes with key."
+  [key & {:keys [decrypt?] :or {decrypt? true}}]
   (map
    (fn [n] (if decrypt? (decode n) n))
    (query
     (substitute
      "SELECT * FROM node WHERE key=$k"
-     {"$k" (prep k)}))))
+     {"$k" (prep key)}))))
 
 
-(defn get-node
+(defn- get-node*
   "Returns the node specified by the parent and key."
-  [parent k & {:keys [decrypt?] :or {decrypt? true}}]
+  [& {:keys [parent key]
+      :or {parent (default-parent)}}]
   (first
    (map
-    (fn [n] (if decrypt? (decode n) n))
+    decode
     (query
      (substitute
       "SELECT * FROM node WHERE key=$k AND parent=$p"
-      {"$k" (prep k)
+      {"$k" (prep key)
        "$p" (prep parent)})))))
+
+
+(defn get-node
+  "Returns the decrypted node specified by either just the key (in which case
+   the default parent is used - if set, or `:root` if not) or by both the parent
+   and the key."
+  ([key] (get-node* {:key key}))
+  ([parent key] (get-node* {:parent parent :key key})))
 
 
 (defn get-all-nodes
@@ -264,11 +294,11 @@
       data)))
 
 
-(defn get-parent-ids
+(defn get-parents
   "Returns parents as a list."
   []
   (map
-   :parent
+   (comp serve :parent)
    (query
     "SELECT DISTINCT parent FROM node")))
 
@@ -281,34 +311,9 @@
    (get-all-nodes :decrypt? true)))
 
 
-(defn- update-value
-  "Defines how new-val is used to update old-val"
-  [old-val new-val]
-  (cond
-    (and (map? old-val) (map? new-val))
-    (merge old-val new-val)
-
-    (and (seq? old-val) (seq? new-val))
-    (concat old-val new-val)
-
-    (and (vector? old-val) (vector? new-val))
-    (into [] (concat old-val new-val))
-
-    (and (set? old-val) (set? new-val))
-    (clojure.set/union old-val new-val)
-
-    (and (sequential? old-val) (sequential? new-val))
-    (concat old-val new-val)
-
-    ;; end of the easy decisions!
-    :else new-val))
-
-
-(defn update-node-with
-  "Updates the value of the node specified by parent & k, by applying
-   f to old value and args."
-  [parent k f & args]
-  (if-let [old-node (get-node parent k)]
+(defn- update-node-with*
+  [parent key f & args]
+  (if-let [old-node (get-node parent key)]
     (let [old-value (:value old-node)
           new-value (try (apply f old-value args)
                          (catch Exception e
@@ -322,37 +327,77 @@
     (throw (ex-info "Node specified by parent and key doesn't exist." {}))))
 
 
+(defn- fn-posn [args]
+  (loop [i 0 args args]
+    (if (not (seq args))
+      nil
+      (if (fn? (first args))
+        i
+        (recur (inc i) (rest args))))))
+
+
+;; bit of a hack to overload with two signatures with variadic args.
+(defn update-node-with
+  "Updates the value of the node specified by parent & key, by applying
+   f to old value and args."
+  {:arglists '([key f & args][parent key f & args])}
+  [& args]
+  (let [[pk [f] args] (partition-by fn? args)
+        c (count pk)
+        key (case c 1 (first pk) 2 (second pk)
+                  (throw (ex-info (str "You must specify either a key or a parent"
+                                       " and key before the update function.") {})))
+        parent (case c 1 (default-parent) 2 (first pk))]
+    (apply update-node-with* parent key f args)))
+
+
+(defn- last-arg [& args] (last args))
+
+
 (defn update-node
-  "Attempts to combine new-value with the existing value specified
-   by parent and k. If old-value and new-value are both Clojure collections,
-   they are merged/ concat'd or unioned depending on the type of collection. If one or
-   other is not a collection or they are not collections of compatible types,
-   then new-value simply replaces the old-value."
-  [parent k new-value]
-  (update-node-with parent k (partial update-value) new-value))
+  "Updates the value of the node specified by just the key (in which case
+   the default parent is used - if set, or `:root` if not) or by both the parent
+   and the key with new-value."
+  ([key new-value] (update-node (default-parent) key new-value))
+  ([parent key new-value]
+   (update-node-with parent key last-arg new-value)))
 
 
 (defn delete-node
-  "Deletes the node specified by parent & k."
-  [parent k]
+  "Deletes the node specified by just the key (in which case
+   the default parent is used - if set, or `:root` if not) or by both the parent
+   and the key."
+  ([key] (delete-node (default-parent) key))
+  ([parent key]
+   (exec!
+    (substitute
+     "DELETE FROM node WHERE parent=$p AND key=$k"
+     {"$p" (prep parent)
+      "$k" (prep key)}))))
+
+
+(defn delete-parent
+  "Deletes all nodes are the specified parent."
+  [parent]
   (exec!
    (substitute
-    "DELETE FROM node WHERE parent=$p AND key=$k"
-    {"$p" (prep parent)
-     "$k" (prep k)})))
+    "DELETE FROM node WHERE parent=$p"
+    {"$p" (prep parent)})))
 
 
 (defn previous-versions
-  "Returns historic versions of the node specified by parent and key.
-   :decrypt? indicates whether the keys and values should be decrypted."
-  [parent key & {:keys [decrypt?] :or {decrypt? false}}]
-  (map
-    (fn [n] (if decrypt? (decode n) n))
+  "Returns historic versions of the node specified by just the key (in which case
+   the default parent is used - if set, or `:root` if not) or by both the parent
+   and the key."
+  ([key] (previous-versions (default-parent) key))
+  ([parent key]
+   (map
+    decode
     (query
      (substitute
       "SELECT * FROM node_history WHERE key=$k AND parent=$p"
       {"$k" (prep key)
-       "$p" (prep parent)}))))
+       "$p" (prep parent)})))))
 
 
 (defn- max-version [nodes]
@@ -360,8 +405,10 @@
 
 
 (defn restore
-  "Restores the value from the last version of a node specified by parent and key, or
-   if a version is also specified, restores the value from that version."
+  "Restores the value from the last version of a node specified by key (with parent defaulted),
+   or parent and key, or if a version is also specified, restores the value from that version."
+  ([key] (restore (default-parent) key))
+  
   ([parent key]
    (if-let [historic-nodes (seq (previous-versions parent key))]
      (restore parent key (max-version historic-nodes))
@@ -369,7 +416,7 @@
   
   ([parent key version]
    (if-let [historic-node (first (filter #(= version (:version %)) (previous-versions parent key)))]
-     (let [historic-value (:value (decode historic-node))]
+     (let [historic-value (:value historic-node)]
        (if (node-exists? parent key)
          (update-node parent key historic-value)
          (add-node parent key historic-value)))

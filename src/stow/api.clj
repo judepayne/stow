@@ -9,7 +9,7 @@
 
 (def cmds
   {:list {:cmd #'db/list-keys :requires-auth? true}
-   :list-parents {:cmd #'db/get-parent-ids :requires-auth? true}
+   :list-parents {:cmd #'db/get-parents :requires-auth? true}
    :add-node {:cmd #'db/add-node :requires-auth? true}
    :add-nodes {:cmd #'db/add-nodes :requires-auth? true}
    :get-nodes-by-parent {:cmd #'db/get-nodes-by-parent :requires-auth? true}
