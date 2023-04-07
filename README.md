@@ -13,7 +13,7 @@ Stow stores your data securely in a local sqlite database using AES256 for encry
 As a git dep:
 
 ```clojure
-io.github.judepayne/dictim {:git/tag "0.0.1" :git/sha "b64ebf3"}
+io.github.judepayne/dictim {:git/tag "0.0.2" :git/sha "cddae48"}
 ``` 
 
 ## Usage
