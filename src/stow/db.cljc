@@ -196,7 +196,7 @@
                            "$k" k}))
                         first
                         :id)]
-            {:id nid :parent :root}))
+            {:id nid :parent parent}))
 
         (if skip?
           :not-inserted
