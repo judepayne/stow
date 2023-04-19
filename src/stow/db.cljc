@@ -4,12 +4,14 @@
    [stow.auth :as auth]
    #?(:bb [babashka.fs :as fs])
    [stow.cipher :as cipher]
+   [clojure.edn :refer [read-string]]
    [stow.serialize :refer [prn-data read-data]]))
 
 
 ;; Specifying pods in bb.edn does not work in libraries which are
 ;; used into another library. i.e. no transitive pods at cur time.
-(pods/load-pod 'org.babashka/go-sqlite3 "0.1.0")
+(pods/load-pod 'org.babashka/go-sqlite3 "0.1.2")
+
 
 (require '[pod.babashka.go-sqlite3 :as sqlite])
 
@@ -96,7 +98,9 @@
 (defn- store-main-hash [salt] (store-config "main-hash" salt))
 
 
-(defn- fetch-def-parent [] (fetch-config "default-parent"))
+(defn- fetch-def-parent []
+  (when-let [stored (fetch-config "default-parent")]
+    (read-string stored)))
 
 
 (defn- store-def-parent [def-parent] (store-config "default-parent" def-parent))
@@ -164,7 +168,7 @@
        "You can additionally specify a :parent. e.g.\n"
        "  :add-node :key facebook.com :value 7\n"
        "  :add-node :parent :work :key facebook.com"
-       " :value {:user mike :pwd '66%$hfhU77^'}"))
+       " :value {:user mike :pwd \"66%$hfhU77^\"}"))
 
 
 (defn- add-node*
@@ -198,9 +202,10 @@
                         :id)]
             {:id nid :parent parent}))
 
-        (if skip?
-          :not-inserted
-          (throw (ex-info (str "That key already exists under parent-id " parent) {})))))))
+        (let [msg (str ":parent " parent ", :key " key " already exists. Didn't insert " value)]
+          (if skip?
+            msg
+            (throw (ex-info msg {}))))))))
 
 
 (defn add-node
@@ -251,6 +256,29 @@
      {"$p" (prep parent)}))))
 
 
+(defn get-parent
+  "Get all nodes belonging to the parent and collapses keys and values into
+   one map for convenience."
+  [parent]
+  (when-let [nodes (seq (get-nodes-by-parent parent))]
+    (-> (reduce
+         (fn [acc m]
+           (assoc acc (:key m) (:value m)))
+         {}
+         nodes)
+        (assoc :parent parent))))
+
+
+(defn change-parent-name
+  "Updates all nodes with parent equal to old-parent to new-parent."
+  [old-parent new-parent]
+  (exec!
+       (substitute
+        "UPDATE node SET parent=$np WHERE parent=$op"
+        {"$op" (prep old-parent)
+         "$np" (prep new-parent)})))
+
+
 (defn get-nodes-by-key
   "Returns nodes with key."
   [key & {:keys [decrypt?] :or {decrypt? true}}]
@@ -294,13 +322,55 @@
       data)))
 
 
+(defn- get-in-node*
+  "Returns the (nested) value in the node specified by parent key and keys."
+  [& {:keys [parent key keys]
+      :or {parent (default-parent)}}]
+  (let [v (:value (get-node parent key))]
+    (if keys
+      (get-in v keys)
+      v)))
+
+
+(defn get-in-node
+  "Returns the decrypted value of the node specified by either just the key (in which case
+   the default parent is used - if set, or `:root` if not) or by both the parent and the
+   key. Keys is an optional sequence of keys. If it is specified returns the nested value
+   specified by keys.
+   Example usage: get-in-node :my-parent :secrets [:confidential :password]"
+  ([key keys] (get-in-node* {:key key :keys keys}))
+  ([parent key keys] (get-in-node* {:key key :keys keys :parent parent})))
+
+
 (defn get-parents
-  "Returns parents as a list."
+  "Returns parents as a list. If a regex is specified (as a string, e.g.: \"abc.*\")
+   filters the parents to only those that match that the regex matches."
+  ([] (get-parents nil))
+  ([regex]
+   (let [parents 
+         (sort
+          (map
+           (comp serve :parent)
+           (query
+            "SELECT DISTINCT parent FROM node")))]
+     (if regex
+       (let [r (re-pattern regex)]
+         (filter
+          (fn [parent] (re-find r parent))
+          parents))
+       parents))))
+
+
+(defn count-nodes
+  "Returns the count of nodes."
   []
-  (map
-   (comp serve :parent)
-   (query
-    "SELECT DISTINCT parent FROM node")))
+  (count (get-all-nodes)))
+
+
+(defn count-parents
+  "Returns the count of parents."
+  []
+  (count (get-parents)))
 
 
 (defn list-keys
@@ -327,13 +397,7 @@
     (throw (ex-info "Node specified by parent and key doesn't exist." {}))))
 
 
-(defn- fn-posn [args]
-  (loop [i 0 args args]
-    (if (not (seq args))
-      nil
-      (if (fn? (first args))
-        i
-        (recur (inc i) (rest args))))))
+(defn- not-fn-or-var? [i] (not (or (fn? i) (var? i))))
 
 
 ;; bit of a hack to overload with two signatures with variadic args.
@@ -342,13 +406,14 @@
    f to old value and args."
   {:arglists '([key f & args][parent key f & args])}
   [& args]
-  (let [[pk [f] args] (partition-by fn? args)
-        c (count pk)
-        key (case c 1 (first pk) 2 (second pk)
-                  (throw (ex-info (str "You must specify either a key or a parent"
-                                       " and key before the update function.") {})))
-        parent (case c 1 (default-parent) 2 (first pk))]
-    (apply update-node-with* parent key f args)))
+  (let [firsts (take-while not-fn-or-var? args)]
+    (case (count firsts)
+      1       (apply update-node-with* (cons (default-parent) args))
+      
+      2       (apply update-node-with* args)
+
+      (throw (ex-info (str "update-node-with must have either key or parent and key "
+                           "before the function.") {})))))
 
 
 (defn- last-arg [& args] (last args))
@@ -369,20 +434,28 @@
    and the key."
   ([key] (delete-node (default-parent) key))
   ([parent key]
-   (exec!
-    (substitute
-     "DELETE FROM node WHERE parent=$p AND key=$k"
-     {"$p" (prep parent)
-      "$k" (prep key)}))))
+   (let [{:keys [rows-affected last-inserted-id] :as result}
+         (exec!
+          (substitute
+           "DELETE FROM node WHERE parent=$p AND key=$k"
+           {"$p" (prep parent)
+            "$k" (prep key)}))]
+     (if (zero? rows-affected)
+       (throw (ex-info "Node specified by parent and key doesn't exist." {}))
+       result))))
 
 
 (defn delete-parent
   "Deletes all nodes are the specified parent."
   [parent]
-  (exec!
-   (substitute
-    "DELETE FROM node WHERE parent=$p"
-    {"$p" (prep parent)})))
+  (let [{:keys [rows-affected last-inserted-id] :as result}
+        (exec!
+         (substitute
+          "DELETE FROM node WHERE parent=$p"
+          {"$p" (prep parent)}))]
+    (if (zero? rows-affected)
+      (throw (ex-info "No nodes with that parent." {}))
+       result)))
 
 
 (defn previous-versions

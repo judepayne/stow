@@ -1,6 +1,6 @@
 {:paths ["src"]
  :pods {org.babashka/buddy {:version "0.3.4"}
-        org.babashka/go-sqlite3 {:version "0.1.0"}}
+        org.babashka/go-sqlite3 {:version "0.1.2"}}
  :tasks
  {:requires ([babashka.fs :as fs]
              [stow.db :as db]

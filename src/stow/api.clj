@@ -13,13 +13,19 @@
    :add-node #'db/add-node
    :add-nodes #'db/add-nodes
    :add-multi #'db/add-multi
+   :count-nodes #'db/count-nodes
+   :count-parents #'db/count-parents
    :get-nodes-by-parent #'db/get-nodes-by-parent
+   :get-parent  #'db/get-parent
+   :change-parent-name #'db/change-parent-name
    :get-nodes-by-key #'db/get-nodes-by-key
    :get-node #'db/get-node
+   :get-in-node #'db/get-in-node
    :get-all-nodes #'db/get-all-nodes
    :update-node-with #'db/update-node-with
    :update-node #'db/update-node
    :delete-node #'db/delete-node
+   :delete-parent #'db/delete-parent
    :previous-versions #'db/previous-versions
    :restore #'db/restore
    :init #'db/init
@@ -55,8 +61,7 @@
   [cmd & args]
   (if-let [f (cmd-fn cmd)]
     (try
-      (if-let [res (apply f args)]
-        {:result res} {:error "Unsuccessful"})
+      {:result (apply f args)}
       (catch clojure.lang.ExceptionInfo e
         {:error (.getMessage e)})
       (catch Exception e
